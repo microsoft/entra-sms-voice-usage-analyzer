@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Shows SMS/Voice auth method policy scope and passkey retirement impact for your Entra tenant.
+    Shows SMS/Voice auth method policy scope and retirement guidance for your Entra tenant.
 .PARAMETER TenantId
     Your Entra ID tenant ID. Optional if already connected.
 #>
@@ -14,15 +14,25 @@ if ($TenantId) { $connectParams.TenantId = $TenantId }
 Connect-MgGraph @connectParams -NoWelcome
 
 # Helper: resolve policy targets
+function Get-PolicyProperty($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $value = $Object.$Name
+    if ($null -ne $value) { return $value }
+    if ($Object.AdditionalProperties -and $Object.AdditionalProperties.ContainsKey($Name)) {
+        return $Object.AdditionalProperties[$Name]
+    }
+    return $null
+}
+
 function Get-PolicyScope($Policy) {
-    $inc = if ($Policy.AdditionalProperties.ContainsKey('includeTargets')) { $Policy.AdditionalProperties.includeTargets } else { @() }
-    $exc = if ($Policy.AdditionalProperties.ContainsKey('excludeTargets')) { $Policy.AdditionalProperties.excludeTargets } else { @() }
+    $inc = @(Get-PolicyProperty $Policy 'includeTargets')
+    $exc = @(Get-PolicyProperty $Policy 'excludeTargets')
 
     $result = @{ IsAllUsers = $false; IncludedGroups = @(); ExcludedGroups = @(); IncludedUsers = @(); ExcludedUsers = @() }
 
     foreach ($t in $inc) {
-        $type = if ($t.targetType) { $t.targetType } else { $t.AdditionalProperties.targetType }
-        $id   = if ($t.id) { $t.id } else { $t.AdditionalProperties.id }
+        $type = Get-PolicyProperty $t 'targetType'
+        $id   = Get-PolicyProperty $t 'id'
         if ($type -eq "group") {
             if ($id -eq "all_users") { $result.IsAllUsers = $true }
             else {
@@ -32,8 +42,8 @@ function Get-PolicyScope($Policy) {
         } elseif ($type -eq "user") { $result.IncludedUsers += $id }
     }
     foreach ($t in $exc) {
-        $type = if ($t.targetType) { $t.targetType } else { $t.AdditionalProperties.targetType }
-        $id   = if ($t.id) { $t.id } else { $t.AdditionalProperties.id }
+        $type = Get-PolicyProperty $t 'targetType'
+        $id   = Get-PolicyProperty $t 'id'
         if ($type -eq "group") {
             $name = try { (Get-MgGroup -GroupId $id -Property DisplayName).DisplayName } catch { $id }
             $result.ExcludedGroups += [PSCustomObject]@{ Id = $id; DisplayName = $name }
@@ -44,15 +54,13 @@ function Get-PolicyScope($Policy) {
 
 # Registration campaign
 $authPolicy = Get-MgPolicyAuthenticationMethodPolicy
-$regEnf = if ($authPolicy.RegistrationEnforcement) { $authPolicy.RegistrationEnforcement }
-          elseif ($authPolicy.AdditionalProperties.ContainsKey('registrationEnforcement')) { $authPolicy.AdditionalProperties.registrationEnforcement }
-          else { $null }
-$campaign = if ($regEnf) {
-    if ($regEnf.AuthenticationMethodsRegistrationCampaign) { $regEnf.AuthenticationMethodsRegistrationCampaign }
-    else { $regEnf.authenticationMethodsRegistrationCampaign }
-} else { $null }
+$migrationState = Get-PolicyProperty $authPolicy 'policyMigrationState'
+if (-not $migrationState) { $migrationState = 'unknown' }
+$regEnf = Get-PolicyProperty $authPolicy 'registrationEnforcement'
+$campaign = Get-PolicyProperty $regEnf 'authenticationMethodsRegistrationCampaign'
 
-$campaignState = if ($campaign) { if ($campaign.State) { $campaign.State } else { $campaign.state } } else { "unknown" }
+$campaignState = Get-PolicyProperty $campaign 'state'
+if (-not $campaignState) { $campaignState = 'unknown' }
 $displayCampaign = if ($campaignState -eq 'default') { 'Microsoft managed' } else { $campaignState }
 Write-Host "`nRegistration campaign: $displayCampaign" -ForegroundColor $(if ($campaignState -eq 'default') { 'Yellow' } elseif ($campaignState -eq 'enabled') { 'Green' } else { 'Red' })
 
@@ -97,14 +105,34 @@ if ($export.Count -gt 0) {
 }
 
 # Impact summary
-$hasUsers = ($smsScope -or $voiceScope)
+function Test-ScopeHasTargets($Scope) {
+    return ($null -ne $Scope -and ($Scope.IsAllUsers -or $Scope.IncludedGroups.Count -gt 0 -or $Scope.IncludedUsers.Count -gt 0))
+}
+
+$hasTargets = (Test-ScopeHasTargets $smsScope) -or (Test-ScopeHasTargets $voiceScope)
+$migrationComplete = $migrationState -eq 'migrationComplete'
+$policyStatesKnown = $smsPolicy.State -in @('enabled', 'disabled') -and $voicePolicy.State -in @('enabled', 'disabled')
 Write-Host "`n===== IMPACT SUMMARY =====" -ForegroundColor Magenta
-if ($hasUsers) {
-    Write-Host "  Sep 1, 2026:  Users in SMS/Voice scope auto-enabled for passkeys. Reg campaign set to Microsoft Managed." -ForegroundColor Yellow
-    Write-Host "                To prevent: move users out of SMS/Voice AMP scope before Sep 1." -ForegroundColor Yellow
-    Write-Host "  Jan 28, 2027: Microsoft SMS/Voice delivery RETIRED. Migrate to passkeys or configure customer-managed provider." -ForegroundColor Red
+Write-Host "  Authentication methods migration state: $migrationState"
+if (-not $migrationComplete) {
+    Write-Host "  Assessment incomplete: legacy MFA/SSPR settings may still allow SMS/Voice and are not read by this script." -ForegroundColor Yellow
+    Write-Host "  Verify legacy settings in the Entra admin center and complete authentication methods policy migration." -ForegroundColor Yellow
+}
+if (-not $policyStatesKnown) {
+    Write-Host "  Assessment incomplete: SMS or Voice policy state is unknown." -ForegroundColor Yellow
+}
+if ($hasTargets) {
+    Write-Host "  Enabled SMS/Voice policy targets found. Targets are not user counts or evidence of actual usage." -ForegroundColor Yellow
+} elseif ($migrationComplete -and $policyStatesKnown) {
+    Write-Host "  No enabled SMS/Voice targets detected in the Authentication Methods Policy." -ForegroundColor Green
+}
+if ($hasTargets -or -not $migrationComplete -or -not $policyStatesKnown) {
+    Write-Host "  Public cloud retirement guidance (not a verification of tenant rollout or provider configuration):"
+    Write-Host "  From Sep 1, 2026: SMS/Voice-enabled users in AMP or legacy MFA are auto-enabled for passkeys and nudged after MFA." -ForegroundColor Yellow
+    Write-Host "  A temporary opt-out can delay automatic passkey and registration campaign enablement until Feb 1, 2027." -ForegroundColor Yellow
+    Write-Host "  Feb 1, 2027: Microsoft-provided SMS/Voice delivery retires. There is no opt-out from retirement enforcement." -ForegroundColor Red
+    Write-Host "  Users with only SMS/Voice available for MFA must register a passkey at sign-in unless migrated to a customer-managed provider." -ForegroundColor Yellow
     Write-Host "  Guide: https://aka.ms/passkeydeploymentguide" -ForegroundColor Cyan
-} else {
-    Write-Host "  SMS/Voice disabled - no action required." -ForegroundColor Green
+    Write-Host "  Retirement and opt-out: https://learn.microsoft.com/entra/identity/authentication/concept-sms-voice-retirement" -ForegroundColor Cyan
 }
 Write-Host ""
