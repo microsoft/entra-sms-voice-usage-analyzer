@@ -103,7 +103,7 @@ if ($hasUsers) {
     Write-Host "  Sep 1, 2026:  Users in SMS/Voice scope auto-enabled for passkeys. Reg campaign set to Microsoft Managed." -ForegroundColor Yellow
     Write-Host "                To prevent: move users out of SMS/Voice AMP scope before Sep 1." -ForegroundColor Yellow
     Write-Host "  Jan 28, 2027: Microsoft SMS/Voice delivery RETIRED. Migrate to passkeys or configure customer-managed provider." -ForegroundColor Red
-    Write-Host "  Guide: https://aka.ms/passkey-deployment-guide" -ForegroundColor Cyan
+    Write-Host "  Guide: https://aka.ms/passkeydeploymentguide" -ForegroundColor Cyan
 } else {
     Write-Host "  SMS/Voice disabled - no action required." -ForegroundColor Green
 }
